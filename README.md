@@ -1,6 +1,6 @@
-# Minimal MDC04 CSV Firmware
+# MDC0x Rust Embassy Driver
 
-This project is a standalone minimal firmware for STM32G030C8 that configures three MDC04 sensors and streams CSV over UART.
+This project is a Rust Embassy implementation of a driver for the MDC0x capacitive-to-digital converter (CDC), packaged here as standalone firmware for STM32G030C8 that configures three MDC04 sensors and streams CSV over UART.
 
 The project structure is organized as follows:
 - `src/main.rs`: Application entry point and hardware initialization.
