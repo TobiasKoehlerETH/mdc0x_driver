@@ -15,6 +15,7 @@ const REG_CFB: u8 = 0x22;
 const CMD_CONVERT_T: u16 = 0xCC44;
 const CMD_CONVERT_C: u16 = 0xCC66;
 const CMD_CLEAR_STATUS: u16 = 0x3041;
+const CMD_SOFT_RESET: u16 = 0x30A2;
 
 const CMD_READ_ONE_BYTE_H: u8 = 0xD2;
 const CMD_WRITE_ONE_BYTE_H: u8 = 0x52;
@@ -94,6 +95,13 @@ where
     I2C: I2c<Error = E>,
 {
     write_cmd16(i2c, address, CMD_CONVERT_C).await
+}
+
+pub async fn soft_reset<I2C, E>(i2c: &mut I2C, address: u8) -> Result<(), DriverError<E>>
+where
+    I2C: I2c<Error = E>,
+{
+    write_cmd16(i2c, address, CMD_SOFT_RESET).await
 }
 
 pub async fn read_conversion_result<I2C, D, E>(

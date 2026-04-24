@@ -5,17 +5,20 @@ mod acquisition;
 mod mdc04_driver;
 mod uart;
 
+use core::mem;
+
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::Config;
-use embassy_stm32::gpio::Speed;
+use embassy_stm32::gpio::{Level, OutputOpenDrain, Speed};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::mode::Async;
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{pac, usart};
 use embassy_stm32::{bind_interrupts, peripherals};
+use embassy_stm32::Peri;
+use embedded_hal_async::delay::DelayNs;
 use embassy_time::Delay;
-use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -26,8 +29,150 @@ bind_interrupts!(struct Irqs {
 
 const I2C_FREQ_KHZ: u32 = 400;
 
-static I2C1_BUS: StaticCell<I2c<'static, Async, embassy_stm32::i2c::Master>> = StaticCell::new();
-static I2C2_BUS: StaticCell<I2c<'static, Async, embassy_stm32::i2c::Master>> = StaticCell::new();
+#[derive(Clone, Copy)]
+enum BusKind {
+    I2c1,
+    I2c2,
+}
+
+pub struct RecoverableI2cBus {
+    name: &'static str,
+    kind: BusKind,
+    config: embassy_stm32::i2c::Config,
+    i2c: Option<I2c<'static, Async, embassy_stm32::i2c::Master>>,
+}
+
+impl RecoverableI2cBus {
+    pub fn new_i2c1(config: embassy_stm32::i2c::Config) -> Self {
+        Self {
+            name: "i2c1",
+            kind: BusKind::I2c1,
+            config,
+            i2c: Some(Self::build_i2c(BusKind::I2c1, config)),
+        }
+    }
+
+    pub fn new_i2c2(config: embassy_stm32::i2c::Config) -> Self {
+        Self {
+            name: "i2c2",
+            kind: BusKind::I2c2,
+            config,
+            i2c: Some(Self::build_i2c(BusKind::I2c2, config)),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub async fn probe(&mut self, address: u8) -> Result<(), embassy_stm32::i2c::Error> {
+        self.i2c().write(address, &[]).await
+    }
+
+    pub async fn init_sensor(
+        &mut self,
+        address: u8,
+        cos_hex: u8,
+        delay: &mut Delay,
+    ) -> Result<(), mdc04_driver::DriverError<embassy_stm32::i2c::Error>> {
+        mdc04_driver::init_sensor(self.i2c(), address, cos_hex, delay).await
+    }
+
+    pub async fn start_conversion(
+        &mut self,
+        address: u8,
+    ) -> Result<(), mdc04_driver::DriverError<embassy_stm32::i2c::Error>> {
+        mdc04_driver::start_conversion(self.i2c(), address).await
+    }
+
+    pub async fn read_conversion_result(
+        &mut self,
+        address: u8,
+        delay: &mut Delay,
+    ) -> Result<mdc04_driver::SensorSample, mdc04_driver::DriverError<embassy_stm32::i2c::Error>>
+    {
+        mdc04_driver::read_conversion_result(self.i2c(), address, delay).await
+    }
+
+    pub async fn soft_reset(
+        &mut self,
+        address: u8,
+    ) -> Result<(), mdc04_driver::DriverError<embassy_stm32::i2c::Error>> {
+        mdc04_driver::soft_reset(self.i2c(), address).await
+    }
+
+    pub async fn recover_interface(&mut self, delay: &mut Delay) {
+        drop(self.i2c.take());
+        match self.kind {
+            BusKind::I2c1 => {
+                pulse_i2c_lines(
+                    unsafe { peripherals::PB8::steal() },
+                    unsafe { peripherals::PB9::steal() },
+                    delay,
+                )
+                .await;
+            }
+            BusKind::I2c2 => {
+                pulse_i2c_lines(
+                    unsafe { peripherals::PB10::steal() },
+                    unsafe { peripherals::PB11::steal() },
+                    delay,
+                )
+                .await;
+            }
+        }
+        self.i2c = Some(Self::build_i2c(self.kind, self.config));
+    }
+
+    fn i2c(&mut self) -> &mut I2c<'static, Async, embassy_stm32::i2c::Master> {
+        self.i2c.as_mut().unwrap()
+    }
+
+    fn build_i2c(
+        kind: BusKind,
+        config: embassy_stm32::i2c::Config,
+    ) -> I2c<'static, Async, embassy_stm32::i2c::Master> {
+        match kind {
+            BusKind::I2c1 => I2c::new(
+                unsafe { peripherals::I2C1::steal() },
+                unsafe { peripherals::PB8::steal() },
+                unsafe { peripherals::PB9::steal() },
+                Irqs,
+                unsafe { peripherals::DMA1_CH1::steal() },
+                unsafe { peripherals::DMA1_CH2::steal() },
+                config,
+            ),
+            BusKind::I2c2 => I2c::new(
+                unsafe { peripherals::I2C2::steal() },
+                unsafe { peripherals::PB10::steal() },
+                unsafe { peripherals::PB11::steal() },
+                Irqs,
+                unsafe { peripherals::DMA1_CH3::steal() },
+                unsafe { peripherals::DMA1_CH4::steal() },
+                config,
+            ),
+        }
+    }
+}
+
+async fn pulse_i2c_lines(
+    scl: Peri<'static, impl embassy_stm32::gpio::Pin>,
+    sda: Peri<'static, impl embassy_stm32::gpio::Pin>,
+    delay: &mut Delay,
+) {
+    let mut scl = OutputOpenDrain::new(scl, Level::High, Speed::Medium);
+    let mut sda = OutputOpenDrain::new(sda, Level::High, Speed::Medium);
+    sda.set_high();
+    delay.delay_us(5).await;
+    for _ in 0..9 {
+        scl.set_low();
+        delay.delay_us(5).await;
+        scl.set_high();
+        delay.delay_us(5).await;
+    }
+    sda.set_high();
+    delay.delay_us(5).await;
+}
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -74,32 +219,27 @@ async fn main(_spawner: Spawner) {
     i2c_cfg.scl_pullup = false;
     i2c_cfg.gpio_speed = Speed::High;
 
+    mem::forget(p.I2C1);
+    mem::forget(p.PB8);
+    mem::forget(p.PB9);
+    mem::forget(p.DMA1_CH1);
+    mem::forget(p.DMA1_CH2);
     info!("Init I2C1");
-    let i2c1 = I2C1_BUS.init(I2c::new(
-        p.I2C1,
-        p.PB8,
-        p.PB9,
-        Irqs,
-        p.DMA1_CH1,
-        p.DMA1_CH2,
-        i2c_cfg,
-    ));
+    let mut i2c1 = RecoverableI2cBus::new_i2c1(i2c_cfg);
     info!("I2C1 ready");
 
+    mem::forget(p.I2C2);
+    mem::forget(p.PB10);
+    mem::forget(p.PB11);
+    mem::forget(p.DMA1_CH3);
+    mem::forget(p.DMA1_CH4);
     info!("Init I2C2");
-    let i2c2 = I2C2_BUS.init(I2c::new(
-        p.I2C2,
-        p.PB10,
-        p.PB11,
-        Irqs,
-        p.DMA1_CH3,
-        p.DMA1_CH4,
-        i2c_cfg,
-    ));
+    let mut i2c2 = RecoverableI2cBus::new_i2c2(i2c_cfg);
     info!("I2C2 ready");
 
     let mut delay = Delay;
 
-    let active_sensors = acquisition::init_sensors(i2c1, i2c2, &mut uart_tx, &mut delay).await;
-    acquisition::run_loop(i2c1, i2c2, &mut uart_tx, &mut delay, active_sensors).await;
+    let active_sensors =
+        acquisition::init_sensors(&mut i2c1, &mut i2c2, &mut uart_tx, &mut delay).await;
+    acquisition::run_loop(&mut i2c1, &mut i2c2, &mut uart_tx, &mut delay, active_sensors).await;
 }
