@@ -15,32 +15,16 @@ pub const SENSOR_BINDINGS: [SensorBinding; 3] = [
 ];
 
 #[derive(Clone, Copy)]
-pub struct ActiveSensors {
-    present: [bool; SENSOR_BINDINGS.len()],
-}
+pub struct ActiveSensors(u8);
 
 impl ActiveSensors {
-    pub const fn none() -> Self {
-        Self {
-            present: [false; SENSOR_BINDINGS.len()],
-        }
+    pub const fn none() -> Self { Self(0) }
+    fn set(&mut self, index: usize, present: bool) {
+        let bit = 1 << index;
+        if present { self.0 |= bit; } else { self.0 &= !bit; }
     }
-
-    fn set_present(&mut self, index: usize) {
-        self.present[index] = true;
-    }
-
-    fn clear_present(&mut self, index: usize) {
-        self.present[index] = false;
-    }
-
-    fn is_present(&self, index: usize) -> bool {
-        self.present[index]
-    }
-
-    fn count(&self) -> usize {
-        self.present.iter().filter(|present| **present).count()
-    }
+    fn has(&self, index: usize) -> bool { self.0 & (1 << index) != 0 }
+    fn count(&self) -> u32 { self.0.count_ones() }
 }
 
 pub async fn init_sensors<I2C1, I2C2, E1, E2>(
@@ -61,7 +45,7 @@ where
     uart::write_text_line(uart_tx, "stage: i2c-scan-done");
 
     for (index, sensor) in SENSOR_BINDINGS.iter().copied().enumerate() {
-        if !active_sensors.is_present(index) {
+        if !active_sensors.has(index) {
             warn!(
                 "Sensor missing bus={} addr=0x{:02X}, leaving CSV slot invalid",
                 sensor.bus, sensor.address
@@ -71,59 +55,12 @@ where
         }
 
         info!("Init sensor bus={} addr=0x{:02X}", sensor.bus, sensor.address);
-        match sensor.bus {
-            "i2c1" => {
-                let init_result = with_timeout(
-                    Duration::from_millis(SENSOR_INIT_TIMEOUT_MS),
-                    mdc04_driver::init_sensor(i2c1, sensor.address, sensor.cos_hex, delay),
-                )
-                .await;
-                match init_result {
-                    Ok(Ok(())) => {
-                        info!("Sensor init ok bus={} addr=0x{:02X}", sensor.bus, sensor.address);
-                        uart::write_text_line(uart_tx, "stage: sensor-init-ok");
-                    }
-                    Ok(Err(_)) => {
-                        warn!("init failed bus={} addr=0x{:02X}", sensor.bus, sensor.address);
-                        active_sensors.clear_present(index);
-                        uart::write_text_line(uart_tx, "stage: sensor-init-failed");
-                    }
-                    Err(_) => {
-                        warn!(
-                            "init timeout bus={} addr=0x{:02X}",
-                            sensor.bus, sensor.address
-                        );
-                        active_sensors.clear_present(index);
-                        uart::write_text_line(uart_tx, "stage: sensor-init-timeout");
-                    }
-                }
-            }
-            _ => {
-                let init_result = with_timeout(
-                    Duration::from_millis(SENSOR_INIT_TIMEOUT_MS),
-                    mdc04_driver::init_sensor(i2c2, sensor.address, sensor.cos_hex, delay),
-                )
-                .await;
-                match init_result {
-                    Ok(Ok(())) => {
-                        info!("Sensor init ok bus={} addr=0x{:02X}", sensor.bus, sensor.address);
-                        uart::write_text_line(uart_tx, "stage: sensor-init-ok");
-                    }
-                    Ok(Err(_)) => {
-                        warn!("init failed bus={} addr=0x{:02X}", sensor.bus, sensor.address);
-                        active_sensors.clear_present(index);
-                        uart::write_text_line(uart_tx, "stage: sensor-init-failed");
-                    }
-                    Err(_) => {
-                        warn!(
-                            "init timeout bus={} addr=0x{:02X}",
-                            sensor.bus, sensor.address
-                        );
-                        active_sensors.clear_present(index);
-                        uart::write_text_line(uart_tx, "stage: sensor-init-timeout");
-                    }
-                }
-            }
+        let ok = match sensor.bus {
+            "i2c1" => init_detected_sensor(i2c1, sensor, uart_tx, delay).await,
+            _ => init_detected_sensor(i2c2, sensor, uart_tx, delay).await,
+        };
+        if !ok {
+            active_sensors.set(index, false);
         }
     }
     uart::write_text_line(uart_tx, "stage: sensor-init-done");
@@ -146,21 +83,21 @@ where
     loop {
         let timestamp_ms = u64_to_i64_saturating(Instant::now().as_millis());
 
-        if active_sensors.is_present(0) {
+        if active_sensors.has(0) {
             trigger_sensor_conversion(i2c1, SENSOR_BINDINGS[0].address).await;
             Timer::after(Duration::from_micros(
                 mdc04_driver::COMMAND_GAP_US as u64,
             ))
             .await;
         }
-        if active_sensors.is_present(1) {
+        if active_sensors.has(1) {
             trigger_sensor_conversion(i2c2, SENSOR_BINDINGS[1].address).await;
             Timer::after(Duration::from_micros(
                 mdc04_driver::COMMAND_GAP_US as u64,
             ))
             .await;
         }
-        if active_sensors.is_present(2) {
+        if active_sensors.has(2) {
             trigger_sensor_conversion(i2c2, SENSOR_BINDINGS[2].address).await;
         }
 
@@ -169,17 +106,17 @@ where
         ))
         .await;
 
-        let s1 = if active_sensors.is_present(0) {
+        let s1 = if active_sensors.has(0) {
             read_sensor_result(i2c1, SENSOR_BINDINGS[0].address, delay).await
         } else {
             SensorSample::invalid()
         };
-        let s2 = if active_sensors.is_present(1) {
+        let s2 = if active_sensors.has(1) {
             read_sensor_result(i2c2, SENSOR_BINDINGS[1].address, delay).await
         } else {
             SensorSample::invalid()
         };
-        let s3 = if active_sensors.is_present(2) {
+        let s3 = if active_sensors.has(2) {
             read_sensor_result(i2c2, SENSOR_BINDINGS[2].address, delay).await
         } else {
             SensorSample::invalid()
@@ -218,7 +155,7 @@ where
 
             for (index, binding) in SENSOR_BINDINGS.iter().enumerate() {
                 if binding.bus == bus_name && binding.address == address {
-                    active_sensors.set_present(index);
+                    active_sensors.set(index, true);
                     info!("Matched logical sensor {} on {}", index + 1, bus_name);
                 }
             }
@@ -238,6 +175,39 @@ where
         .await,
         Ok(Ok(()))
     )
+}
+
+async fn init_detected_sensor<I2C, E>(
+    i2c: &mut I2C,
+    sensor: SensorBinding,
+    uart_tx: &mut BufferedUartTx<'static>,
+    delay: &mut Delay,
+) -> bool
+where
+    I2C: embedded_hal_async::i2c::I2c<Error = E>,
+{
+    match with_timeout(
+        Duration::from_millis(SENSOR_INIT_TIMEOUT_MS),
+        mdc04_driver::init_sensor(i2c, sensor.address, sensor.cos_hex, delay),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            info!("Sensor init ok bus={} addr=0x{:02X}", sensor.bus, sensor.address);
+            uart::write_text_line(uart_tx, "stage: sensor-init-ok");
+            true
+        }
+        Ok(Err(_)) => {
+            warn!("init failed bus={} addr=0x{:02X}", sensor.bus, sensor.address);
+            uart::write_text_line(uart_tx, "stage: sensor-init-failed");
+            false
+        }
+        Err(_) => {
+            warn!("init timeout bus={} addr=0x{:02X}", sensor.bus, sensor.address);
+            uart::write_text_line(uart_tx, "stage: sensor-init-timeout");
+            false
+        }
+    }
 }
 
 async fn trigger_sensor_conversion<I2C, E>(i2c: &mut I2C, address: u8)
