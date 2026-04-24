@@ -24,7 +24,7 @@ bind_interrupts!(struct Irqs {
     USART1 => usart::BufferedInterruptHandler<peripherals::USART1>;
 });
 
-const I2C_FREQ_KHZ: u32 = 400;
+const I2C_FREQ_KHZ: u32 = 200;
 
 static I2C1_BUS: StaticCell<I2c<'static, Async, embassy_stm32::i2c::Master>> = StaticCell::new();
 static I2C2_BUS: StaticCell<I2c<'static, Async, embassy_stm32::i2c::Master>> = StaticCell::new();
@@ -100,6 +100,6 @@ async fn main(_spawner: Spawner) {
 
     let mut delay = Delay;
 
-    acquisition::init_sensors(i2c1, i2c2, &mut uart_tx, &mut delay).await;
-    acquisition::run_loop(i2c1, i2c2, &mut uart_tx, &mut delay).await;
+    let active_sensors = acquisition::init_sensors(i2c1, i2c2, &mut uart_tx, &mut delay).await;
+    acquisition::run_loop(i2c1, i2c2, &mut uart_tx, &mut delay, active_sensors).await;
 }

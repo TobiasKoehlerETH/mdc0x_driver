@@ -1,6 +1,6 @@
 # MDC0x Rust Embassy Driver
 
-This project is a Rust Embassy implementation of a driver for the MDC0x capacitive-to-digital converter (CDC), packaged here as standalone firmware for STM32G030C8 that configures three MDC04 sensors and streams CSV over UART.
+This project is a Rust Embassy implementation of a driver for the MDC0x capacitive-to-digital converter (CDC), packaged here as standalone firmware for STM32G030C8 that configures up to three MDC04 sensors and streams CSV over UART.
 
 The project structure is organized as follows:
 - `src/main.rs`: Application entry point and hardware initialization.
@@ -10,6 +10,7 @@ The project structure is organized as follows:
 
 ## Scope
 - I2C mode on MDC04.
+- Scan both I2C buses at startup and enable whichever configured sensors are actually present.
 - Configure each sensor with a custom `COS` trim value and a fixed `CFB=0x00` span value.
 - High-repeatability single-shot reads of channel 3 and high-repeatability temperature.
 - Auto-stream CSV as fast as possible over UART.
@@ -61,23 +62,20 @@ Outputs one line as fast as the sensors can be read (expected output data rate i
 Error sentinel per sensor field is `-1`.
 
 ## Read Sequence
-To maximize sampling rate, the firmware interleaves the I2C sensor conversions:
-1. `CONVERT_C` command sent to Sensor 1 (`i2c1`, addr `0x44`).
-2. Delay `1 ms` (`COMMAND_GAP_US`).
-3. `CONVERT_C` command sent to Sensor 2 (`i2c2`, addr `0x44`).
-4. Delay `1 ms` (`COMMAND_GAP_US`).
-5. `CONVERT_C` command sent to Sensor 3 (`i2c2`, addr `0x45`).
-6. The MCU waits for `10.5 ms` (`SINGLE_CHANNEL_CONVERSION_US_HIGH_REPEATABILITY`) for all three sensors to finish their conversions simultaneously.
-7. Read Sensor 1 complete result (Capacitance LSB/MSB, then Temperature, each with `1 ms` delays interspersed).
-8. Read Sensor 2 complete result.
-9. Read Sensor 3 complete result.
-10. Format and output the CSV line over UART at `230400` baud.
-11. Repeat loop.
+At startup, the firmware scans both I2C buses and only initializes the configured sensor slots that acknowledge on their expected bus/address. During acquisition it interleaves conversions only for the detected sensors:
+1. Scan `i2c1` and `i2c2`.
+2. Match discovered devices against the configured logical sensor slots.
+3. Initialize only the sensors that were found.
+4. Send `CONVERT_C` to each detected sensor, with `1 ms` (`COMMAND_GAP_US`) between commands.
+5. Wait `10.5 ms` (`SINGLE_CHANNEL_CONVERSION_US_HIGH_REPEATABILITY`) for conversion completion.
+6. Read each detected sensor result.
+7. Emit one CSV line over UART at `230400` baud.
+8. Keep missing sensor slots as `-1` in the CSV output.
 
 This parallel conversion strategy reduces total read time from ~40.5ms (sequential waiting) per cycle down to ~15ms per cycle.
 
 ## Build
-From `i2c_raw`:
+From the repository root:
 
 ```bash
 cargo check
@@ -94,4 +92,4 @@ cargo run --release
 ## Notes
 - Temperature conversion used: `mdegC = raw * 1000 / 256 + 40000`.
 - Clock stretching is enabled.
-- I2C frequency is 400 kHz (Fast Mode).
+- I2C frequency is 200 kHz.
