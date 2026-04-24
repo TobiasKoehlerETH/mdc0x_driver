@@ -27,7 +27,7 @@ bind_interrupts!(struct Irqs {
     USART1 => usart::BufferedInterruptHandler<peripherals::USART1>;
 });
 
-const I2C_FREQ_KHZ: u32 = 400;
+const I2C_FREQ_KHZ: u32 = 200;
 
 #[derive(Clone, Copy)]
 enum BusKind {
