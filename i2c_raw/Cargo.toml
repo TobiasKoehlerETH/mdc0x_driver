@@ -1,0 +1,38 @@
+[package]
+name = "sm-mainboard-firmware-minimal"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Minimal STM32G030C8 firmware for MDC04 CH3+temperature CSV over UART"
+
+[dependencies]
+embassy-stm32 = { version = "0.5.0", features = [
+    "stm32g030c8",
+    "time-driver-any",
+    "memory-x",
+    "unstable-pac",
+    "defmt",
+] }
+embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-1_000_000"] }
+embedded-hal-async = "1.0"
+embedded-io = "0.7"
+
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+
+defmt = "1.0.1"
+defmt-rtt = "1.1.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+
+heapless = "0.9.2"
+static_cell = "2.1.1"
+portable-atomic = { version = "1.13.1", features = ["critical-section"] }
+
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
+embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = "z"
+codegen-units = 1
